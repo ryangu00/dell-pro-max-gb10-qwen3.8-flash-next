@@ -1,57 +1,57 @@
-# Qwen3.8-Flash-Next on Dell Pro Max with GB10 ×2 —— 与 50K 长上下文安全线的发现
+# Qwen3.8-Flash-Next on Dell Pro Max with GB10 ×2 — and Discovering the 50K Long-Context Safety Line
 
-> GDN+QSA 新架构模型的双机部署实录。质量很强(我们的配对评测胜过 DeepSeek V4 Flash),prefill 极快,
-> 但在这套栈上有一条**用标称值看不见的长上下文死线**。本书一半是部署指南,一半是"怎么找到你自己栈上的死线"的方法论。
+> A field report on dual-node deployment of a new-architecture GDN+QSA model. Quality is strong (it beat DeepSeek V4 Flash in our paired evals), prefill is blazing fast —
+> but on this stack there is a **long-context kill line that nominal specs will never show you**. Half of this book is a deployment guide; the other half is a methodology for finding the kill line on your own stack.
 
-## 硬件与版本
+## Hardware and Versions
 
-| 项 | 规格/版本 |
+| Item | Spec/Version |
 |---|---|
-| 机器 | Dell Pro Max with GB10 ×2(200GbE 直连,同本系列 DSV4F 篇拓扑) |
-| 配方 | [MiaAI-Lab/Qwen3.8-Flash-Next-Dual-DGX-Sparks](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Dual-DGX-Sparks)(含 start.sh/check-weights.sh) |
-| 权重 | 126GiB ×2 分片(HF 仓库随配方指定),下载后 **pin revision `7b71922` 并跑配方 check-weights.sh 校验分片完整** |
-| 架构 | GDN(Gated DeltaNet)+ QSA 混合注意力——**长上下文行为与全注意力模型不同,这是本书的核心** |
+| Machine | Dell Pro Max with GB10 ×2 (200GbE direct link, same topology as the DSV4F book in this series) |
+| Recipe | [MiaAI-Lab/Qwen3.8-Flash-Next-Dual-DGX-Sparks](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Dual-DGX-Sparks) (includes start.sh/check-weights.sh) |
+| Weights | 126GiB ×2 shards (HF repo specified by the recipe); after downloading, **pin revision `7b71922` and run the recipe's check-weights.sh to verify shard integrity** |
+| Architecture | GDN (Gated DeltaNet) + QSA hybrid attention — **long-context behavior differs from full-attention models; this is the core of this book** |
 
-## 结果速览(实测)
+## Results at a Glance (measured)
 
-| 指标 | 数值 |
+| Metric | Value |
 |---|---|
-| Prefill | 2321 tok/s(~30K 单发 prompt、单座、TP2 双机,GDN 架构红利) |
-| 质量 | 配对评测胜 DeepSeek V4 Flash;agentic 语义理解在我们的配对样本中显著更强(对方会把"如果下雨改线上会"错解为"线上会议改期"+相对日期算错,本模型不会) |
-| 标称上下文 | 1M |
-| **实测安全线** | **≤50K;~95K 起 native 层确定性击杀 worker**(vLLM sm_121 双机栈) |
+| Prefill | 2321 tok/s (~30K single-shot prompt, single-seat, TP2 dual-node — the GDN architecture dividend) |
+| Quality | Beat DeepSeek V4 Flash in paired evals; agentic semantic understanding was significantly stronger on our paired samples (the other model misread "if it rains, switch to an online meeting" as "reschedule the online meeting" and miscalculated relative dates; this model did not) |
+| Nominal context | 1M |
+| **Measured safety line** | **≤50K; from ~95K the native layer deterministically kills the worker** (vLLM sm_121 dual-node stack) |
 
-## 核心:长上下文死线的发现与测法
+## The Core: Finding and Measuring the Long-Context Kill Line
 
-标称 `max_model_len=1M`,配置也能起,小流量一切正常——然后一个 ~95K 的长 prompt 直接把 worker 进程 native crash(不是 OOM、不是超时,是确定性击杀,同 prompt 100% 复现)。二分探测后:50K 以下安全,50K-95K 区间不稳定,≥95K 必死。
+Nominal `max_model_len=1M`, the config boots fine, everything works under light traffic — then a single ~95K prompt native-crashes the worker process (not OOM, not a timeout: a deterministic kill, 100% reproducible with the same prompt). After bisection probing: below 50K is safe, 50K-95K is unstable, ≥95K always dies.
 
-**方法论(适用于任何新架构模型上线)**:
-1. 别信 `max_model_len`——那是模型侧标称,不是"你的引擎+你的算子栈+你的硬件"的承诺。GDN/线性注意力类新架构在新硬件(sm_121)上的算子路径远不如全注意力路径成熟。
-2. 上线前跑**长度阶梯实测**:8K→32K→50K→95K→144K→200K。最小可复现方法:
-   - 生成器:用重复段落填充到目标 token 数,在文首/中/尾各插一句唯一事实(needle,如"仓库钥匙在第三个抽屉");
-   - 每档调用 `/v1/chat/completions` 问 needle 内容,判定=回答包含该唯一事实;
-   - 记录:HTTP 状态/worker 进程存活(`pgrep` 前后对比)/延迟。worker 消失=native 击杀,与 OOM/超时区分开。
-3. 找到死线后**在服务配置里硬编码安全上限**(而不是记在文档里指望调用方自觉)。
-4. 别人的绿不是你的绿:同一模型在别的引擎/单机/别的量化下可能完全没这个问题——我们看到有人在不同栈上跑同模型长文无恙。死线属于"组合",不属于模型。
+**Methodology (applies to bringing up any new-architecture model)**:
+1. Don't trust `max_model_len` — that's the model-side nominal figure, not a promise about "your engine + your kernel stack + your hardware". Kernel paths for GDN/linear-attention architectures on new hardware (sm_121) are far less mature than full-attention paths.
+2. Before going live, run a **length-ladder measurement**: 8K→32K→50K→95K→144K→200K. Minimal reproducible method:
+   - Generator: pad with repeated paragraphs to the target token count, and insert one unique fact (a needle, e.g. "the warehouse key is in the third drawer") at the beginning/middle/end of the text;
+   - At each rung, call `/v1/chat/completions` asking for the needle; pass = the answer contains that unique fact;
+   - Record: HTTP status / worker process liveness (`pgrep` before vs. after) / latency. Worker gone = native kill, distinct from OOM/timeout.
+3. Once you find the kill line, **hard-code the safe ceiling in the service config** (rather than noting it in docs and hoping callers behave).
+4. Someone else's green is not your green: the same model on a different engine / single node / different quantization may not have this problem at all — we've seen people run the same model on long inputs on other stacks without issue. The kill line belongs to the *combination*, not the model.
 
-## 部署要点
+## Deployment Essentials
 
 ```bash
-# 配方自带 start.sh/stop.sh/check-weights.sh,流程:
-# 1. 下载权重(126GiB×2,耐心)→ check-weights.sh 校验分片完整
-# 2. .env 里同样注意 *_HOST_IP 占位符清零(同本系列 DSV4F 篇坑 #1)
-# 3. max_model_len 按实测安全线设置(我们设 ≤50K),不要照抄标称 1M
+# The recipe ships start.sh/stop.sh/check-weights.sh; the flow:
+# 1. Download weights (126GiB×2, be patient) → check-weights.sh to verify shard integrity
+# 2. In .env, likewise zero out the *_HOST_IP placeholders (same as pitfall #1 in this series' DSV4F book)
+# 3. Set max_model_len to the measured safety line (we set ≤50K); do not copy the nominal 1M
 ```
 
-## 我们最终怎么用它
+## How We Ended Up Using It
 
-判定:**战备**而非生产——质量赢了,但 50K 硬限对我们的长上下文场景(代码库注入、长文档)是结构性风险。权重与配置完整保留在位,一键可切换(配置零删除原则);等引擎侧修复 GDN 长上下文算子路径后随时转正。
-如果你的负载是**短上下文创作/对话为主**(≤32K),这个模型是这块硬件上性价比极高的选择,大胆用。
+Verdict: **standby**, not production — it won on quality, but the 50K hard limit is a structural risk for our long-context workloads (codebase injection, long documents). Weights and config stay fully in place, switchable with one command (zero-deletion config principle); the moment the engine side fixes the GDN long-context kernel path, it gets promoted.
+If your workload is **mostly short-context creative/chat** (≤32K), this model is an outstanding value on this hardware — go for it.
 
-## 何时选这套方案
+## When to Pick This Setup
 
-✅ 短上下文高质量创作/agentic 负载,吃它的 prefill 速度与语义理解
-❌ 任何可能超 50K 的场景(在此栈上) → 本系列 DSV4F 双机篇(1M 实证)
+✅ Short-context high-quality creative/agentic workloads that feed on its prefill speed and semantic understanding
+❌ Anything that might exceed 50K (on this stack) → the DSV4F dual-node book in this series (1M proven)
 
 ---
-*RyanAI Lab · 数字来自我们的常驻环境实测,更新于 2026-09。欢迎 issue 反馈。*
+*RyanAI Lab · All numbers measured on our resident environment. Updated 2026-09. Issues welcome.*
