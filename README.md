@@ -1,10 +1,9 @@
-# Qwen3.8-Flash-Next on two Dell Pro Max with GB10 — from a 50K safety line (first recipe, 2026-08-31) to a 1M-context production engine (2026-09-20)
+# Qwen3.8-Flash-Next on two Dell Pro Max with GB10 — from a 50K safety line (first recipe, 2026-08-31) to a 1M-context engine that served production for about 4.5 days (2026-09-20 to 2026-09-25)
 
 > A field report on dual-node deployment of a new-architecture GDN+QSA model. Quality is strong (it beat DeepSeek V4 Flash in our paired evals), prefill is blazing fast —
 > but on the **first recipe we tried, this stack had a long-context kill line that nominal specs will never show you**. Half of this book is a deployment guide for that first recipe; the other half is a methodology for finding the kill line on your own stack. Part 2 moves to a community cluster recipe where that kill line no longer reproduces.
 
-> **Status (2026-09-20):** the 2026-08-31 findings in Part 1 are **historical** — they were properties of that first recipe, not of the model.
-> With a community cluster recipe (Part 2) the long-context kill line no longer reproduces, and **this model became our production model on 2026-09-20**.
+> **Status (2026-10):** the 2026-08-31 findings in Part 1 are **historical** — they were properties of that first recipe, not of the model. With a community cluster recipe (Part 2) the long-context kill line no longer reproduces. The model was our production model on the two-node GB10 setup from 2026-09-20 to 2026-09-25 (about 4.5 days). On 2026-09-25 production moved to another machine and this two-node GB10 setup became the rollback tier. The Part 1 findings remain historical and the Part 2 measurements remain valid for the recipe and hardware they were taken on.
 
 ## Hardware and Versions
 
@@ -53,7 +52,7 @@ Verdict (2026-08-31): **standby**, not production — it won on quality, but the
 
 ## Part 2 — What Changed (2026-09-18 to 2026-09-20)
 
-We moved off the first recipe onto a **community cluster recipe**: a vLLM `b12x` MoE backend, TP2 over RoCE, MTP-4 speculative decoding, fp8 KV cache. On this recipe the long-context kill line from Part 1 did **not** reproduce, and the model cleared our full private eval bank. The 2026-08-31 verdict is reversed: this model is now production.
+We moved off the first recipe onto a **community cluster recipe**: a vLLM `b12x` MoE backend, TP2 over RoCE, MTP-4 speculative decoding, fp8 KV cache. On this recipe the long-context kill line from Part 1 did **not** reproduce, and the model cleared our full private eval bank. The 2026-08-31 verdict is reversed: this model was production from 2026-09-20 to 2026-09-25 (see the Update (2026-10) section).
 
 ### Long context at 200K and then 1M
 
@@ -83,11 +82,45 @@ We moved off the first recipe onto a **community cluster recipe**: a vLLM `b12x`
 - Native 262K remains the **better form on the categories we measured**: kbqa **+5.0** (percentage points, in thinking mode), long-coding wall **0.62×** (the wall-clock ratio native / 1M, in thinking mode).
 - 1M is therefore a **per-workload choice**, not a blanket upgrade.
 
-### Production since 2026-09-20
+### Production, 2026-09-20 to 2026-09-25
 
-- **Production since 2026-09-20**, with **thinking effort low on the fast tier** and **medium on the quality tier**.
+- Production from 2026-09-20 to 2026-09-25, with **thinking effort low** on the fast tier and **medium** on the quality tier (the settings in force during that window). Since 2026-09-25 this setup is the rollback tier.
+
+## Update (2026-10)
+
+This section records what happened after the Part 2 measurements, with numbers taken at hand-over on the two-node GB10 setup. Times are local time, as recorded when the switch operations were made.
+
+**Timeline (observed, from the operation records)**
+
+| Event | When | Note |
+|---|---|---|
+| Two-node NF setup took over production | 2026-09-20 ~13:36 | observed |
+| Production role moved off this setup to another machine; two-node NF configuration kept as documented rollback tier | 2026-09-25 ~01:10 | elapsed ~4 days 11.5 h, i.e. about 4.5 days (computed) |
+| Same two nodes served a different model as the fallback and long-context path | 2026-09-25 ~01:14 | observed (the DeepSeek V4 Flash Vision-Exp setup from the sibling book in this series) |
+| Pair stopped running as a pair: one node reassigned, the other ran a single-node model | 2026-09-26 | observed |
+| Documented switch-back mode: engine start about 4 min | — | author-reported from the private switch script; same figure as in the 1M-context book; not re-measured for this update |
+
+The two-node NF configuration is still recorded as a rollback mode, but based on the records, using it is inferred to require reclaiming the second node; this was not tested. Whether that reclaim works today was not tested (no live probes); only the recorded configuration state is reported.
+
+**Measurements on the two-node GB10 setup at the time of the hand-over**
+
+| Measurement | Value | Date / conditions |
+|---|---|---|
+| Decode throughput, single stream | **42.0 tok/s** | 2026-09-23. vLLM, tensor parallel 2 across the two nodes, NVFP4 weights; short Chinese-language prose request ("write an essay about the ocean"), max_tokens 600; first run discarded, median of three hot runs. Production configuration of that date; exact launch flags for this measurement not recorded. *Comparability warning: the 52 tok/s single-stream figure already in the 1M-context book was taken on 2026-09-19 with a 400-token prose completion; this measurement used a different prompt and token budget on a different day. The two numbers must not be read as a regression or as a contradiction. The cause of the 52 vs 42.0 difference was not investigated.* |
+| Decode throughput, concurrent | **109.1 tok/s aggregate** at 4 streams (per-stream average 27.3 tok/s); **128.9 tok/s aggregate** at 8 streams (per-stream average 16.1 tok/s) | Same date and conditions as above. Measured. |
+| Prefill throughput at long context | **Median 2,724 tok/s** (runs 2,716 / 2,735 / 2,724) on prompts of about 63.8K–63.9K tokens; time to first token 23.3–23.5 s | 2026-09-25 ~01:08, reached through a tunnel to the head node. Three runs with mutually different prompts. |
+| Quality at hand-over | **Mean 89.5** over our private 11-category eval bank (questions not published) | 2026-09-24 (runs started 22:48 and 23:36). Thinking effort "low", max_tokens 16384, two runs per category, median per category, mean of the 11 category medians. One question is worth 3.3 points on the 30-question categories, so differences of a few points are within noise. |
+
+
+**Unresolved / not verified**
+
+- Whether the dual-node rollback can be started today was not tested (no live probes). Only the recorded configuration state is reported.
+- The cause of the difference between the 52 tok/s and 42.0 tok/s decode figures was not investigated.
+- The hand-over measurements (single stream, concurrent, prefill) are single-session measurements without a stated hardware or load state beyond the conditions listed.
 
 ## When to Pick This Setup
+
+This section describes what the Part 2 recipe can do on two GB10 nodes; it is no longer our standing production engine (see Update 2026-10).
 
 ✅ High-quality creative/agentic workloads — and now also long-context workloads on the Part 2 recipe (configured to 1M and validated up to 950K-token prompts — needle content recall 9/9 at 400K, 700K and 950K — with zero crashes across two full 200K rounds)
 ✅ Short-context workloads that feed on prefill speed and semantic understanding
@@ -103,4 +136,4 @@ We moved off the first recipe onto a **community cluster recipe**: a vLLM `b12x`
 | The engine A/B (first recipe vs community cluster recipe) | [dell-pro-max-gb10-qwen3.8-flash-next-engine-ab](https://github.com/ryangu00/dell-pro-max-gb10-qwen3.8-flash-next-engine-ab) |
 
 ---
-*RyanAI Lab · All numbers measured on our resident environment. Updated 2026-09. Issues welcome.*
+*RyanAI Lab · Updated 2026-10. Issues welcome.*
